@@ -1,16 +1,34 @@
 ---
-title: "Data for: Partitioning inorganic carbon fluxes using paired $O_2$-$CO_2$ sensors in a headwater stream, Costa Rica"
+title: "Data for: Partitioning inorganic carbon fluxes using paired $O_2$-$CO_2$ sensors in a headwater stream, Costa Rica, Submitted to Biogeochemistry"
+
 author: "Nicholas S. Marzolf"
+
 date: "Last updated: June 18, 2021"
 output: 
-  html_document:
-    toc: true
-    toc_depth: 3
+  pdf_document: 
+    toc: yes
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
 ```
+
+## Publication information
+Full authorship and affiliations:
+
+Nicholas S. Marzolf^1^ ^\*^, Gaston E. Small^2^, Diana Oviedo-Vargas^3^, Carissa N. Ganong^4^, John H. Duff^5^, Alonso Ramírez^6^, Catherine M. Pringle^7^, David P. Genereux^8^, Marcelo Ardón^1,9^
+
+1 Department of Forestry and Environmental Resources, North Carolina State University, NC, USA (ORCiD: 0000-0001-9146-1643)  
+2 College of Arts and Sciences, University of St. Thomas, MN, USA (ORDiD: 0000-0002-9018-7555)  
+3 Stroud Water Research Center, Avondale, PA, USA (ORCiD: 0000-0001-9333-0962)  
+4 Department of Biology, Missouri Western State University, MO, USA  
+5 US Geological Survey, Menlo Park, CA, USA  
+6 Department of Applied Ecology, North Carolina State University, NC, USA (ORCiD: 0000-0001-9985-5719)  
+7 Odum School of Ecology, University of Georgia, GA, USA (ORCiD: 0000-0002-3522-7315)  
+8 Marine, Earth, and Atmospheric Sciences, North Carolina State University, NC, USA (ORCiD: 0000-0001-5601-7088)  
+9 ORCiD: 0000-0001-7275-2672  
+* Corresponding author: nmarzol@ncsu.edu 
+
 
 ## Load packages and explore the data
 ```{r load-pkgs-data, echo = TRUE, message=FALSE}
