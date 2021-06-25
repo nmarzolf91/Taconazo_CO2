@@ -604,17 +604,17 @@ GW_cor_pH = ggplot(Tac_corr %>%
          filter(sumGW > 1e-5), 
        aes(x = sumGW,
            y = meanpH))+
-  geom_point(aes(color = month(Timestamp, 
-                               label = TRUE, abbr = TRUE)))+
+  geom_point(aes(color = month(Timestamp, label = TRUE, abbr = TRUE)))+
   geom_errorbar(aes(ymin = meanpH - sdpH,
                     ymax = meanpH + sdpH,
-                    color = month(Timestamp, 
-                                  label = TRUE, abbr = TRUE)))+
+                    color = month(Timestamp, label = TRUE, abbr = TRUE)))+
   geom_smooth(method = 'lm', 
               color = 'grey',
               alpha = 0.25)+
   scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
-                labels = trans_format("log10", math_format(10^.x)))+
+                labels = trans_format("log10", math_format(10^.x)),
+                limits = c(1e-5, 10^(-0.5)))+
+  ylim(3.8, 6)+
   scale_color_viridis_d(name = 'Month')+
   xlab(expression(paste(GW[CO[2]], ' (mol DIC ', d^-1, ")")))+
   ylab('Mean Daily pH')+
