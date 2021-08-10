@@ -3,7 +3,7 @@ title: "Data for: Partitioning inorganic carbon fluxes using paired $O_2$-$CO_2$
 
 author: "Nicholas S. Marzolf"
 
-date: "Last updated: June 18, 2021"
+date: "Last updated: August 10, 2021"
 output: 
   pdf_document: 
     toc: yes
@@ -567,9 +567,9 @@ Tac_scaled_out
 
 Tac_scaled_dCdt = ggplot(Tac_scale)+
   geom_density(aes(x = dC_dt), fill = 'grey')+
-  xlab(expression(paste("dDIC ", dt^-1, ' (mol DIC)')))+
-  theme(axis.title.x = element_blank(),
-        axis.text.x = element_blank())+
+  xlab(expression(paste("dDIC ", dt^-1, ' (mol DIC ', h^-1, ')')))+
+  ylab('Count')+
+  theme(axis.text.x = element_blank())+
   coord_flip()
 Tac_scaled_dCdt
 
@@ -598,9 +598,28 @@ Tac_corr = Tac_scale %>%
             sumDICout = sum(DIC_out, na.rm = TRUE),
             sumrain = sum(Rainfall, na.rm = TRUE),
             meanpH = mean(pH, na.rm = TRUE),
-            sdpH = sd(pH, na.rm = TRUE))
+            sdpH = sd(pH, na.rm = TRUE),
+            efflux = sum(CO2_efflux, na.rm = TRUE))
 
-GW_cor_pH = ggplot(Tac_corr %>%
+cor.test(y = Tac_corr$sumGW, x = Tac_corr$sumrain,   # p < 0.15, t = 0.08
+         method = 'kendall') 
+cor.test(y = Tac_corr$sumDICin, x = Tac_corr$sumrain,   # p < 0.01, t = 0.16
+         method = 'kendall') 
+cor.test(y = Tac_corr$sumNEP, x = Tac_corr$sumrain,   # p < 0.78, t = -0.01
+         method = 'kendall') 
+cor.test(y = Tac_corr$sumF, x = Tac_corr$sumrain,   # p < 0.37, t = 0.05
+         method = 'kendall') 
+cor.test(y = Tac_corr$sumDICout, x = Tac_corr$sumrain,   # p < 0.01, t = 0.16
+         method = 'kendall') 
+
+# correlate GWCO2 with pH
+
+summary(lm(data = Tac_corr %>%
+             filter(sumGW > 1e-5),
+           meanpH ~ log10(sumGW))
+        )
+
+Fig7 = ggplot(Tac_corr %>%
          filter(sumGW > 1e-5), 
        aes(x = sumGW,
            y = meanpH))+
@@ -616,11 +635,11 @@ GW_cor_pH = ggplot(Tac_corr %>%
                 limits = c(1e-5, 10^(-0.5)))+
   ylim(3.8, 6)+
   scale_color_viridis_d(name = 'Month')+
-  xlab(expression(paste(GW[CO[2]], ' (mol DIC ', d^-1, ")")))+
+  xlab(expression(paste('GW Flux (mol DIC ', d^-1, ")")))+
   ylab('Mean Daily pH')+
   annotate(x = 0.1, y = 4, 'text', label = expression(italic("p < 0.01")))+
   annotate(x = 0.1, y = 4.2, 'text', label = expression(italic(paste(R^2,"= 0.06"))))
-GW_cor_pH
+Fig7
 ```
 
 
