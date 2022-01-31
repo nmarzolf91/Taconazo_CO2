@@ -3,7 +3,7 @@ title: "Data for: Partitioning inorganic carbon fluxes using paired $O_2$-$CO_2$
 
 author: "Nicholas S. Marzolf"
 
-date: "Last updated: August 10, 2021"
+date: "Last updated: January 31, 2022"
 output: 
   pdf_document: 
     toc: yes
@@ -32,22 +32,31 @@ Nicholas S. Marzolf^1^ ^\*^, Gaston E. Small^2^, Diana Oviedo-Vargas^3^, Carissa
 
 ## Load packages and explore the data
 ```{r load-pkgs-data, echo = TRUE, message=FALSE}
+# data manipulation
 library(dplyr)
 library(tidyr)
 library(lubridate)
+library(tidyquant)
+# plotting
 library(ggplot2)
 library(cowplot)
 library(ggrepel)
-library(pander)
-library(tidyquant)
 library(scales)
+library(ggsci)
+# stats
 library(lmodel2)
 library(ellipse)
-library(ggsci)
 library(purrr)
+library(lsmeans)
+library(emmeans)
+library(ARTool)
+# hydrology
+library(hydrostats)
+# reproducibility
+library(pander)
 
-# Read in hourly data file
-Tac_all = readRDS("Tac_all.rds")
+# Read in hourly data 
+Tac_all <- readRDS("Tac_all.rds")
 ```
 
 This file contains hourly data from April 1 - September 27, including: stream and well Vaisala pCO2 sensors (CO2_ppm, wellCO2), YSI sonde (temp.water, pH, DO.obs, DO.sat, cond), discharge (sumQ_m3_hr, meanQ_m3_s), and meterological data (relative humidity (RH), Rainfall, barometric pressure (bp_mmHg)) from the weather station located at La Selva Biological Station. Rainfall is collected at 15-minute intervals, and there data here are aggregated to hourly sums. Discharge is collected at 15-minute intervals, and is shown as both mean discharge for the hour (m3/s) and sum of the 4 contributing measurements (m3/hr). Groundwater discharge (GW_Q) is described in the text. Mean depth is taken from the weir. 
@@ -57,167 +66,717 @@ glimpse(Tac_all)
 
 We will use this dataset build on with the following calculations at the hourly resolution and aggregate to daily scale at the end of the document.
 
-## Inorganic carbon chemistry
-Here, we calculate the necessary parameters for $[DIC]$ partitioning and flux calculations.
-
-From pH measured from the sonde, we calculate $[H^+]$ and use the carbonate equilibrium constants, $K_1$ and $K_2$ to calculate $[DIC]$ partitioning coefficients to estimate $[H_2CO_3^*]$, $[HCO_3^-]$, and $[CO_3^{2-}]$ (which we ultimately don't consider due to the pH). The partioning coefficients, $\alpha_0$, $\alpha_1$, and $\alpha_2$ correspond to the fraction of $[H_2CO_3^*]$, $[HCO_3^-]$, and $[CO_3^{2-}]$, respectively.
-
-$$
-\alpha_0 = {(1 + \frac{K_1}{[H^+]} + \frac{K_1K_2}{[H^+]^2})^{-1}}
-$$
-$$
-\alpha_1 = {(1 + \frac{[H^+]}{K_1} + \frac{K_2}{[H^+]})^{-1}}
-$$
-$$
-\alpha_2 = {(1 + \frac{[H^+]}{K_2} + \frac{[H^+]^2}{K_1K_2})^{-1}}
-$$
-
-Since we calculate $CO_2$ (as $[H_2CO_3^*]$) using Henry's Law, we can use the partitioning coefficients to estimate $[DIC]$:
-$$
-[DIC] = \frac{[H_2 CO3^*]}{\alpha_0}
-$$
-
-From $[DIC]$, we calculate $[HCO3^-]$ as
-$$
-[HCO3^-] = [DIC]*\alpha_1
-$$
-
-``` {r C-chem, warning = FALSE, echo = TRUE}
-
-# define carbonate equilibrium constants (reference)
-k1 = 10^-6.3  # k1 = [H+][HCO3-]/[H2CO3]
-k2 = 10^-10.3 # k2 = [H+][CO32-]/[HCO3-]
-
-Tac_all = Tac_all %>%
-  mutate(
-    
-    # calculate [H+] from pH
-    H = 10^(-1*pH),
-    
-    # DIC dissociation constants
-    alpha0 = (1 + (k1/H) + ((k1*k2)/(H^2)))^-1,
-    alpha1 = (1 + (H/k1) + (k2/H))^-1,
-    alpha2 = (1 + (H/k2) + ((H^2)/(k1*k2)))^-1,
-    
-    # temperature-corrected Henry's Law constant (atm*L/mol, Plummer and Busenberg 1982)
-    kH = 29.41*exp(-2400*(1/(273 + temp.water) - (1/298))),  
-    
-    # CO2 saturation (mol m-3), assuming 400 ppm
-    CO2_sat = ((400/1e6)/kH)*1000,
-    
-    # CO2 in the stream and well (mol m-3)
-    CO2_aq = ((CO2_ppm/1e6)/kH)*1000,
-    CO2_well = ((wellCO2/1e6)/kH)*1000,
-    
-    # DIC partitioning; since pH was < 7, CO3 was <0.2% of DIC, and not calculated
-    H2CO3 = (1/kH)*(CO2_ppm/1000),    # H2CO3* (mol m-3)
-    TotDIC = H2CO3/alpha0,            # total DIC (mol m-3)
-    HCO3 = TotDIC * alpha1            # HCO3 (mol m-3)
-  )
-```
-
-## $CO_2$ flux calculations
-### $CO_2$ evasion ($F_{CO2}$) 
-``` {r C-fluxes, echo = TRUE, warning = FALSE}
-
-## seasonal gas exchange coefficients from Oviedo-Vargas et al. (2015)
-K_prop_wet = 10.2   # gas exchange coefficient for wet season propane (d-1)
-K_prop_dry = 27.2   # gas exchange coefficient for dry season propane (d-1)
-
-# calculate Schmidt numbers for propane, CO2, and O2, using mean temperature (Raymond et al. 2012)
-temp_mean = mean(Tac_all$temp.water, na.rm = TRUE)
-
-Sc_prop = 3545.60 - (203.41*temp_mean) + (4.78*(temp_mean^2)) - (0.0404*(temp_mean^3))
-Sc_CO2 = 1686.08 - (89.66*temp_mean) + (2.07*(temp_mean^2)) - (0.018*(temp_mean^3))
-Sc_O2 = 1568 - (86.04*temp_mean) + (2.142*(temp_mean^2)) - (0.0216*(temp_mean^3))
-
-# Convert to units for CO2 (to calculate CO2 evasion)
-K_CO2_dry = K_prop_dry*(Sc_prop/Sc_CO2)^0.7 # gas exchange coefficient for CO2, d-1
-K_CO2_wet = K_prop_wet*(Sc_prop/Sc_CO2)^0.7 # gas exchange coefficient for CO2, d-1
-
-# Convert to units for O2 (to calculate net ecosystem production later on)
-K_O2_dry = K_prop_dry*(Sc_prop/Sc_O2)^0.7 # gas exchange coefficient for O2, d-1
-K_O2_wet = K_prop_wet*(Sc_prop/Sc_O2)^0.7 # gas exchange coefficient for O2, d-1
-
-# calculate evasion for dry season (April) and wet season (May-September), g C m-2 h-1
-# gas exchange coefficients are scaled from d^-1 to hr^-1
-# multiply by stream depth to scale to area of the stream
-# multiply by 12.01 to convert mol C to g C
-
-Tac_all = Tac_all %>%
-  mutate(
-    CO2_efflux = ifelse(month(Timestamp) == 'April',
-                        ((CO2_aq - CO2_sat)*(K_CO2_dry/24))*mean_depth,  # mol C m-2 h-1
-                        ((CO2_aq - CO2_sat)*(K_CO2_wet/24))*mean_depth)  # mol C m-2 h-1
-    )
-```
-
-### Hydrologic fluxes: $GW_{CO2}$, up- and down-reach exports
-```{r hydro-fluxes, warning = FALSE}
-
-# Dimensions of the Taconazo
+## Define constants  
+These constants define aspects of Taconazo and the lower study reach in this study. The widths were measured during propane injections from Oviedo-Vargas et al. (2015).  
+``` {r constants, warning = FALSE, echo = TRUE}
 Tac_length = 1587.4       # total length of the main-stem Taconazo
-Tac_reach = 75            # length of the study reach, m
+Tac_reach = 75            # m
 Tac_width_upper_dry = 1.4 # m
 Tac_width_upper_wet = 1.8 # m
 Tac_width_lower_dry = 1.5 # m
 Tac_width_lower_wet = 2.8 # m
+Tac_width_lower_dry = 1.5 # m
+Tac_width_lower_wet = 2.8 # m
+Tac_slope = 0.0024        # m/m
+```
 
-Tac_all = Tac_all %>%
+## Gas exchange
+To estimate gas exchange, we use the equations from Raymond et al. (2012) best suited for small streams (1 and 2). We first estimate Schmidt numbers for relevant gases, CO[2] and O[2]. We use mean hourly depth to convert between k600 and K600. To determine which equation estimates gas exchange, we compare a rating curve of k600 and discharge using AIC and predict values based on mean hourly discharge.  
+```{r gas-exchange, warning=FALSE, echo = TRUE}
+# calculate mean temperature
+temp_mean = mean(Tac_all$temp.water, 
+                 na.rm = TRUE)
+
+# estimate Schmidt numbers
+Sc_prop = 3545.60 - (203.41*temp_mean) + (4.78*(temp_mean^2)) - (0.0404*(temp_mean^3))
+Sc_CO2 = 1686.08 - (89.66*temp_mean) + (2.07*(temp_mean^2)) - (0.018*(temp_mean^3))
+Sc_O2 = 1568 - (86.04*temp_mean) + (2.142*(temp_mean^2)) - (0.0216*(temp_mean^3))
+
+# estimate k600 from equations 1 and 2 from Raymond et al. (2012)
+Tac_k600 <- Tac_all %>%
+  select(Timestamp, meanQ_m3_s, mean_depth) %>%
+  
+  # calculate hourly unit velocity and Froude number
   mutate(
-    # groundwater velocity, or the volume of GW entering the benthic area in the reach (m h-1)
-    GW_velocity = ifelse(month(Timestamp) == 'April',
-                              GW_Q/(Tac_reach * Tac_width_lower_dry),
-                              GW_Q/(Tac_reach * Tac_width_lower_wet)
-                              ),
+    # velocity and Froude number
+    Tac_unit_v = ifelse(month(Timestamp) == 'April',
+                        meanQ_m3_s/(mean_depth * Tac_width_lower_dry),
+                        meanQ_m3_s/(mean_depth * Tac_width_lower_wet)),
+    Tac_froude = Tac_unit_v/(sqrt(9.81*mean_depth)),
     
-    # GWCO2 flux (mol CO2 m-2 h-1)
-    GWCO2 = GW_velocity * CO2_well,
-   
-    # upreach discharge (m3 h-1); subtract out groundwater discharge from discharge at the weir
+    # scaling models from Raymond et al. (2012) and high/low errors
+    k600_eq1 = 5037*
+      ((Tac_unit_v*Tac_slope)^(0.89))*
+      (mean_depth^(0.54)),
+    k600_eq1_low = (5037-604)*
+      ((Tac_unit_v*Tac_slope)^(0.89-0.02))*
+      (mean_depth^(0.54-0.03)),
+    k600_eq1_high = (5037+604)*
+      ((Tac_unit_v*Tac_slope)^(0.89+0.02))*
+      (mean_depth^(0.54+0.03)),
+    
+    k600_eq2 = 5937*
+      (1 - (2.54*(Tac_froude^2)))*
+      ((Tac_unit_v*Tac_slope)^(0.89))*
+      (mean_depth^0.58),
+    k600_eq2_low = (5937-606)*
+      (1 - ((2.54-0.223)*(Tac_froude^2)))*
+      ((Tac_unit_v*Tac_slope)^(0.89-0.017))*
+      (mean_depth^(0.58-0.027)),
+    k600_eq2_high = (5937+606)*
+      (1 - ((2.54+0.223)*(Tac_froude^2)))*
+      ((Tac_unit_v*Tac_slope)^(0.89+0.017))*
+      (mean_depth^(0.58+0.027))
+  )
+
+# Mean daily k600 for equations 1 and 2
+Tac_k600_sum <- Tac_k600 %>%
+  group_by(day = date(Timestamp)) %>%                     # estimate at daily time-steps
+  summarise(meanQ = mean(meanQ_m3_s, na.rm = TRUE),       # mean daily discharge
+            mean_z = mean(mean_depth, na.rm = TRUE),      # mean daily depth
+            
+            # mean gas exchange velocities
+            mean_k600_eq1 = mean(k600_eq1, na.rm = TRUE), # estimate EQ1 gas exchange velocity (m/d)
+            mean_k600_eq2 = mean(k600_eq2, na.rm = TRUE), # estimate EQ2 gas exchange velocity (m/d)
+            
+            # mean error of gas exchange velocities
+            mean_k600_eq1_low = mean(k600_eq1_low, na.rm = TRUE),
+            mean_k600_eq1_high = mean(k600_eq1_high, na.rm = TRUE),
+            mean_k600_eq2_low = mean(k600_eq2_low, na.rm = TRUE),
+            mean_k600_eq2_high = mean(k600_eq2_high, na.rm = TRUE)
+  )
+
+plot_k600_eq1 <- ggplot(Tac_k600_sum, 
+                       aes(x = day))+
+  geom_point(aes(y = mean_k600_eq1, color = 'Equation 1'),
+             alpha = 0.5)+
+  
+  geom_ribbon(alpha = 0.2,
+              aes(ymin = mean_k600_eq1 - mean_k600_eq1_low,
+                     ymax = mean_k600_eq1 + mean_k600_eq1_high,
+                     fill = 'Equation 1'))+
+  scale_color_manual(values = 'blue')+
+  scale_fill_manual(values = 'blue')+
+  ylab(expression(paste(k[600], ' (m/d)')))+
+  ggtitle('Equation 1')+
+  theme(legend.position = 'none')
+plot_k600_eq1
+
+plot_k600_eq2 <- ggplot(Tac_k600_sum, 
+                        aes(x = day))+
+  geom_point(aes(y = mean_k600_eq2, color = 'Equation 2'),
+             alpha = 0.5)+
+  geom_ribbon(alpha = 0.2,
+              aes(ymin = mean_k600_eq2 - mean_k600_eq2_low,
+                  ymax = mean_k600_eq2 + mean_k600_eq2_high,
+                  fill = 'Equation 2'))+
+  scale_color_manual(values = 'red')+
+  scale_fill_manual(values = 'red')+
+  ylab(expression(paste(k[600], ' (m/d)')))+
+  ggtitle('Equation 2')+
+  theme(legend.position = 'none')
+plot_k600_eq2
+
+# which model fits the data best- plot and compare using AIC
+k600_Q_ratingCurve_eq1 <- ggplot()+
+  geom_point(data = Tac_k600_sum, 
+             aes(x = meanQ, y = mean_k600_eq1, 
+                 color = 'Equation 1'), 
+             alpha = 0.5)+
+  geom_ribbon(data = Tac_k600_sum, alpha = 0.5,
+              aes(x = meanQ, 
+                  ymin = mean_k600_eq1_low, 
+                  ymax = mean_k600_eq1_high,
+                  fill = 'Equation 1'))+
+  scale_x_log10()+
+  scale_y_log10()+
+  scale_color_manual(values = 'blue')+
+  scale_fill_manual(values = 'blue')+
+  labs(x = expression(paste('Mean Daily Dicharge (', m^3,'/s)')),
+       y = expression(paste(k[600], ' (m/d)')))+
+  theme(legend.position = 'none')
+k600_Q_ratingCurve_eq1
+
+k600_Q_ratingCurve_eq2 <- ggplot()+
+  geom_point(data = Tac_k600_sum, 
+             aes(x = meanQ, y = mean_k600_eq2, 
+                 color = 'Equation 2'), 
+             alpha = 0.5)+
+  geom_ribbon(data = Tac_k600_sum, alpha = 0.5,
+              aes(x = meanQ,
+                  ymin = mean_k600_eq2_low, 
+                  ymax = mean_k600_eq2_high,
+                  fill = 'Equation 2'))+
+  scale_color_manual(values = 'red')+
+  scale_fill_manual(values = 'red')+
+  scale_x_log10()+
+  scale_y_log10()+
+  labs(x = expression(paste('Mean Daily Dicharge (', m^3,'/s)')),
+       y = expression(paste(k[600], ' (m/d)')))+
+  theme(legend.position = 'none')
+k600_Q_ratingCurve_eq2
+
+FigS4 <- plot_grid(plot_k600_eq1, plot_k600_eq2,
+                   k600_Q_ratingCurve_eq1, k600_Q_ratingCurve_eq2,
+                   nrow = 2, ncol = 2,
+                   align = 'hv')
+FigS4
+
+# which equation fits the data better
+# use AIC to compare k600 ~ Q power law curves
+eq1_ratingCurve <- lm(data = Tac_k600_sum,
+                      log10(mean_k600_eq1) ~ log10(meanQ))
+coef(eq1_ratingCurve)
+
+
+eq2_ratingCurve <- lm(data = Tac_k600_sum,
+                      log10(mean_k600_eq2) ~ log10(meanQ))
+coef(eq2_ratingCurve)
+
+AIC(eq1_ratingCurve, eq2_ratingCurve)
+
+
+# convert k600 to KO2 and KCO2
+Tac_gas_data <- Tac_k600_sum %>% 
+  mutate(
+    # convert to kCO2 and kO2
+    mean_k_CO2_eq2 = mean_k600_eq2*(600/Sc_CO2)^0.7, # Schmidt scaling to convert k600 to kCO2
+    mean_k_O2_eq2 = mean_k600_eq2*(600/Sc_O2)^0.7,   # Schmidt scaling to convert k600 to kO2
+    
+    # calculate first order coefficients
+    mean_K600_eq2 = mean_k600_eq2/mean_z,
+    mean_K_CO2_eq2 = mean_k_CO2_eq2/mean_z,
+    mean_K_O2_eq2 = mean_k_O2_eq2/mean_z
+  ) %>%
+  # select the data we need
+  select(day, meanQ, mean_z, 
+         mean_k600_eq2, mean_k600_eq2_high, mean_k600_eq2_low,
+         mean_K600_eq2, mean_K_CO2_eq2, mean_K_O2_eq2)
+```
+
+## Figure 2
+Figure 2 details the stream measurements. We plot rainfall, discharge, groundwater discharge, dissolved oxygen, CO2 in the stream and in the riparian well.  
+```{r fig-2}
+plot_rain <- ggplot(Tac_all %>%
+                      select(Timestamp, Rainfall) %>%
+                      group_by(Date = date(Timestamp)) %>%
+                      summarise(dayRain = sum(Rainfall, na.rm = TRUE)))+
+  geom_bar(aes(x = as.POSIXct(Date),
+               y = dayRain), 
+           stat = 'identity', fill = 'black')+
+  ylim(120, 0)+
+  ylab('Daily Rainfall (mm)')+
+  scale_x_datetime(date_breaks = "1 month", date_labels =  "%b")+
+  theme(axis.title.x = element_blank())
+plot_rain
+
+plot_Q <- ggplot(Tac_all, 
+                 aes(x = Timestamp))+
+  geom_line(aes(y = sumQ_m3_hr), 
+            color = 'black')+
+  geom_line(aes(y = GW_Q), 
+            color = 'red')+        
+  ylab(expression(paste("Discharge (", m^3," ", hr^-1,")")))+
+  scale_color_manual(values = c('black', 
+                                'red'))+
+  scale_x_datetime(date_breaks = "1 month", 
+                   date_labels =  "%b")+
+  theme(axis.title.x = element_blank())
+plot_Q
+
+plot_do <- ggplot(data = Tac_all, aes(x = Timestamp))+
+  geom_point(aes(y = DO.obs))+
+  labs(x = "Time", 
+       y = expression(paste("DO (mg " ,L^{-1},")")))+
+  ylim(0,8)+
+  theme(axis.title.x = element_blank())+
+  scale_x_datetime(date_breaks = "1 month", 
+                   labels = date_format("%b"))
+plot_do
+
+plot_wellCO2 <- ggplot(Tac_all, 
+                       aes(x = Timestamp))+
+  geom_point(aes(y = wellCO2), 
+             color = 'black')+
+  ylab(expression(paste("Well ", CO[2]," ", "(ppmv)")))+
+  scale_x_datetime(date_breaks = "1 month", 
+                   date_labels =  "%b")+
+  theme(axis.title.x = element_blank())+
+  ylim(30000, 50000)
+plot_wellCO2
+
+plot_streamCO2 <- ggplot(Tac_all, 
+                         aes(x = Timestamp))+
+  geom_point(aes(y = CO2_ppm), 
+             color = 'black')+
+  ylab(expression(paste("Stream ", CO[2]," ", "(ppmv)")))+
+  scale_x_datetime(date_breaks = "1 month", 
+                   date_labels =  "%b")+
+  theme(axis.title.x = element_blank())
+plot_streamCO2
+
+Fig2 <- plot_grid(plot_rain, plot_Q, plot_do, plot_streamCO2, plot_wellCO2,
+                  nrow = 5,
+                  align = 'hv',
+                  labels = 'auto', label_fontface = 'plain',
+                  hjust = c(-9, -10, -10.5,-10,-9), vjust = 2)
+Fig2
+```
+
+## Fig S2
+Here, we explore diel variation in stream parameters. This exploration is informative for estimating metabolism. As there is little diel variation, we use a direct approach to estimate net ecosystem production (NEP).  
+```{r fig-s2}
+tempHour <- ggplot(Tac_all, 
+                   aes(x = hour(Timestamp), y = temp.water))+
+  geom_line(alpha = 0.5, 
+            aes(group = yday(Timestamp), 
+                color = yday(Timestamp)))+
+  geom_point(alpha = 0.5, 
+             aes(group = yday(Timestamp), 
+                 color = yday(Timestamp)))+
+  xlab('Hour')+
+  scale_colour_viridis_c(name = "Julian Day")+
+  theme(legend.title = element_text(face = 'plain'))+
+  ylab("Temperature (°C)")
+tempHour
+
+# pH
+pHHour <- ggplot(Tac_all, 
+                 aes(x = hour(Timestamp), y = pH))+
+  geom_line(alpha = 0.5, 
+            aes(group = yday(Timestamp), 
+                color = yday(Timestamp)))+
+  geom_point(alpha = 0.5, 
+             aes(group = yday(Timestamp), 
+                 color = yday(Timestamp)))+
+  labs(x = 'Hour', y = "pH")+
+  scale_colour_viridis_c(name = "Julian Day")+
+  theme(legend.title = element_text(face = 'plain'))
+pHHour
+
+# stream CO2, ppm
+CO2Hour = ggplot(Tac_all, 
+                 aes(x = hour(Timestamp), y = CO2_ppm))+
+  geom_line(alpha = 0.5, 
+            aes(group = yday(Timestamp), color = yday(Timestamp)))+
+  geom_point(alpha = 0.5, 
+             aes(group = yday(Timestamp), color = yday(Timestamp)))+
+  xlab('Hour')+
+  ylab(expression(paste(pCO[2], ' (ppm)')))+
+  scale_colour_viridis_c(name = "Julian Day")+
+  theme(legend.title = element_text(face = 'plain'))
+CO2Hour
+
+# dissolved oxygen
+DOHour = ggplot(Tac_all, 
+                aes(x = hour(Timestamp), y = DO.obs))+
+  geom_line(alpha = 0.5, 
+            aes(group = yday(Timestamp), color = yday(Timestamp)))+
+  geom_point(alpha = 0.5, 
+             aes(group = yday(Timestamp), color = yday(Timestamp)))+
+  xlab('Hour')+
+  ylab(expression(paste(O[2], " (mg "," ",L^{-1},")")))+
+  scale_colour_viridis_c(name = 'Julian Day')+
+  theme(legend.title = element_text(face = 'plain'))
+DOHour
+
+FigS2 <- plot_grid(tempHour, pHHour, CO2Hour, DOHour,
+                   ncol = 2, nrow = 2, align = 'hv',
+                   labels = 'auto')
+FigS2
+```
+
+## Fig 3
+Here, we plot CO2 and O2 in respect to their atmospheric saturation concentrations. We calculate saturation concentrations for O2 using a barometric pressure model (Hall and Hotchkiss 2017) and for CO2 assuming atmopsheric CO2 of 400 ppm. We then explore the mean departure coordinates for the entire data collection period and for each month. The coordinates and slope inform processes that simultaneouly control O[2] and CO[2] in the stream.  
+```{r fig-3}
+Tac_departure <- Tac_all %>%
+  mutate(
+    # temperature-corrected Henry's Law constant (Plummer and Busenberg 1982)
+    kH = 29.41*exp(-2400*(1/(273 + temp.water) - (1/298))), 
+    
+    # in-stream CO2-aq calculations
+    CO2_aq = ((CO2_ppm/1e6)/kH)*1000,      # aqueous CO2: mol CO2 m-3
+    CO2_sat = ((400/1e6)/kH)*1000, 
+    
+    ts = log((298.15 - temp.water)/(298.15 + temp.water)),   # function as part of O2 saturation, Hall and Hotchkiss (2017), Methods in Stream Ecology
+    u = 10^(8.10765 - (1750.3/(235 + temp.water))),          # function as part of O2 saturation
+    
+    Osat = exp(2.00907 +                                     
+                 (3.22014*ts) + 
+                 (4.0501*ts^2) + 
+                 (4.94457*ts^3) - 
+                 (0.256847*ts^4) + 
+                 (3.88767*ts^5)) * 
+      ((bp_mmHg - u)/(760 - u))*1.42905,
+    
+    CO2_dep = (CO2_aq - CO2_sat)*1000,   # umol/L
+    O2_dep = ((DO.obs - Osat)/32)*1000)  # umol/L
+
+
+Tac_dep_clean <- na.omit(Tac_departure)
+
+Tac_dep_clean$month = lubridate::month(Tac_dep_clean$Timestamp,
+                                       abbr = TRUE, label = TRUE)
+
+# calculate mean and sd
+Tac_mu <- c(mean(Tac_dep_clean$CO2_dep, na.rm = TRUE),
+            mean(Tac_dep_clean$O2_dep, na.rm = TRUE))
+Tac_sd <- c(sd(Tac_dep_clean$CO2_dep, na.rm = TRUE),
+            sd(Tac_dep_clean$O2_dep, na.rm = TRUE))
+# correlation and covariance matrix
+Tac_corMat <- cor(cbind(Tac_dep_clean$CO2_dep,
+                        Tac_dep_clean$O2_dep))
+Tac_covMat <- cov(cbind(Tac_dep_clean$CO2_dep,
+                        Tac_dep_clean$O2_dep))
+# eigen values
+Tac_evals <- eigen(Tac_covMat)$values
+Tac_ell_length <- 2*sqrt(5.991*Tac_evals)
+
+# run linear model
+Tac_reg <- lmodel2(data = Tac_dep_clean,
+                   O2_dep ~ CO2_dep, 
+                   nperm = 99)
+
+# extract values from regression
+Tac_inter = Tac_reg$regression.results[2,2]
+Tac_slope = Tac_reg$regression.results[2,3]
+Tac_correlation = Tac_reg$r
+
+# create new data frame
+Tac_metrics <- data.frame(meanCO2dep = Tac_mu[1],
+                          meanO2dep = Tac_mu[2],
+                          offset = Tac_mu[1] + Tac_mu[2],
+                          EQ = 1/abs(Tac_slope),
+                          width = Tac_ell_length[2],
+                          stretch = Tac_ell_length[1])
+Tac_metrics
+
+# plot- all data points with 95% CI ellipsis
+Fig3 <- ggplot(data = Tac_departure, 
+               aes(x = CO2_dep, 
+                   y = O2_dep, 
+                   color = factor(month(Timestamp))))+
+  geom_point(alpha = 0.2)+
+  geom_hline(yintercept = 0)+
+  geom_vline(xintercept = 0)+
+  geom_abline(intercept = 0, slope = -1, linetype = 2)+
+  xlim(-20, 400)+
+  ylim(-400, 20)+
+  xlab(expression(paste(CO[2], " Departure (µM)")))+
+  ylab(expression(paste(O[2], " Departure (µM)")))+
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))+
+  scale_color_viridis_d(name = "Month",
+                        labels = c("Apr", "May", "Jun", "Jul", "Aug", "Sep"))
+Fig3
+
+
+# summary for each month of the data
+Tac_summary_mon <- Tac_dep_clean %>%
+  group_by(month(Timestamp, label = TRUE, abbr = TRUE)) %>%
+  dplyr::summarise(meanCO2_dep = mean(CO2_dep, na.rm = TRUE),
+                   meanO2_dep = mean(O2_dep, na.rm = TRUE),
+                   sdCO2_dep = sd(CO2_dep, na.rm = TRUE),
+                   sdO2_dep = sd(O2_dep, na.rm = TRUE),
+                   corMat = cor(cbind(CO2_dep, O2_dep)),
+                   covMat = cor(cbind(CO2_dep, O2_dep))) %>%
+  dplyr::mutate(offset = meanCO2_dep + meanO2_dep,
+                evals_1 = eigen(covMat)$values[1],
+                evals_2 = eigen(covMat)$values[2],
+                ell_length_1 = 2*sqrt(5.991*evals_1),
+                ell_length_2 = 2*sqrt(5.991*evals_2)) %>%
+  dplyr::rename(month = `month(Timestamp, label = TRUE, abbr = TRUE)`) %>%
+  group_by(month) %>% 
+  filter(row_number() %% 2==0)
+
+Tac_model_metrics <- Tac_dep_clean %>% 
+  select(Timestamp, CO2_dep, O2_dep) %>%
+  dplyr::mutate(month = factor(month(Timestamp, abbr= TRUE, label = TRUE))) %>%
+  nest(-month) %>%
+  mutate(model = map(data,
+                     ~lmodel2(O2_dep ~ CO2_dep, nperm = 99, 
+                              data = .)),
+         tidy = map(model, 
+                    broom::tidy),
+         glance = map(model, 
+                      broom::glance)) %>%
+  unnest(tidy, glance) %>%
+  select(month, method, term, estimate, r.squared) %>%
+  mutate(r = -sqrt(r.squared)) %>%
+  filter(method == 'OLS') %>%
+  spread(term, 
+         estimate) 
+
+Tac_metrics_mon <- data.frame(month = Tac_summary_mon$month,
+                              meanCO2_dep = Tac_summary_mon$meanCO2_dep,
+                              meanO2_dep = Tac_summary_mon$meanO2_dep,
+                              sdCO2_dep = Tac_summary_mon$sdCO2_dep,
+                              sdO2_dep = Tac_summary_mon$sdO2_dep,
+                              cor = Tac_summary_mon$corMat[,1],
+                              offset = Tac_summary_mon$offset,
+                              slope = 1/abs(Tac_model_metrics$Slope),
+                              width = Tac_summary_mon$ell_length_2,
+                              stretch = Tac_summary_mon$ell_length_1)
+```
+
+## Fig S3
+Here, we explore the variation in pCO2 during high and low flow events. We use a baseflow separation approach to distinguish flow and storm conditions by means of a filter parameter, alpha. To assess which alpha fits our reach, we vary alpha and visually evaluate the resulting separation time series. 
+```{r fig-s3}
+# baseflow separation approach
+# iterate alphas to determine the 'best' to use
+alphas <- seq(0.9, 0.99, by = 0.01)
+
+hydro_output_all <- tibble()
+
+for(p in 1:length(alphas)) {
+  hydro_output <- baseflows(flow.ts = Tac_all %>% 
+                              select(Date = Timestamp,
+                                     Q = sumQ_m3_hr),
+                            a = alphas[p],
+                            n.reflected = 30,
+                            ts = 'daily') %>%
+    mutate(bfi = bf/Q,
+           alpha = !!alphas[p])
+  
+  hydro_output_all <- rbind(hydro_output, hydro_output_all)
+}
+
+# plot Q and bf across the different alphas
+FigS3 <- ggplot(hydro_output_all,
+       aes(x = Date))+
+  geom_line(aes(y = Q, color = 'Storm Flow'))+
+  geom_line(aes(y = bf, color = 'Baseflow'))+
+  facet_wrap(. ~ alpha,
+             ncol = 3)+
+  ylab('Discharge (m3/h)')+
+  theme(axis.title.x = element_blank(),
+        legend.title = element_blank())
+FigS3
+```
+
+## Figure 4
+We then merge the separated hydrograph with the pCO2 data and compare pCO2 at baseflows and storm flows.  We use a non-parametric statistcal approach to compare pCO2 across interacting month and flow condition, given the non-normally distributed pCO[2] data.
+```{r fig-4}
+Tac_baseflow <- baseflows(Tac_all %>% 
+                            select(Date = Timestamp,
+                                   Q = sumQ_m3_hr),
+                          a = 0.96,
+                          n.reflected = 30,
+                          ts = 'daily') %>%
+  mutate(bfi = bf/Q,
+         stormflow = Q - bf,
+         source = ifelse(bfi > 0.5,
+                         'Baseflow',
+                         'Storm Flow'),
+         month = month(Date, label = TRUE, abbr = TRUE)) %>%
+  rename(Timestamp = Date)
+# bfi = fraction of baseflow calculated; bfi = 1 means all baseflow, 0 = all stormflow
+
+# plot- baseflow on top of stream discharge
+Fig4a <- ggplot(Tac_baseflow)+
+  geom_line(aes(x = Timestamp,
+                y = Q,
+                color = 'Storm Flow'),
+            size = 1)+
+  geom_line(aes(x = Timestamp,
+                y = bf,
+                color = 'Baseflow'),
+            size = 1)+
+  scale_color_jco()+
+  ylab(expression(paste('Discharge (', m^3, ' ',hr^-1,')')))+
+  scale_x_datetime(date_breaks = "1 month", 
+                   date_labels =  "%b")+
+  theme(axis.title.x = element_blank(),
+        legend.position = c(1, 1), 
+        legend.justification = c(1, 1),
+        legend.background = element_rect(color = 'black'),
+        legend.title = element_blank())
+Fig4a
+
+
+# join hydrograph separation with pCO2 data
+Tac_baseflow_hyst <- left_join(
+  Tac_baseflow,
+  Tac_all %>%
+    select(Timestamp, CO2_ppm))
+
+shapiro.test(Tac_baseflow_hyst$CO2_ppm)
+
+pco2_source_art <- art(data = Tac_baseflow_hyst %>% 
+                         dplyr::mutate(source_f = factor(source)) %>%
+                         dplyr::select(month, source_f, CO2_ppm) %>%
+                         tidyr::drop_na(),
+                       CO2_ppm ~ month * source_f)
+
+anova(pco2_source_art)
+
+art.con(pco2_source_art, 
+        'source_f')
+art.con(pco2_source_art, 
+        'month',
+        method = "pairwise")
+
+contrast(emmeans(artlm(pco2_source_art, 'month:source_f'), 
+                 ~ month:source_f),
+         method = 'pairwise', interaction = TRUE)
+
+
+# plot CO2 vs stormflow
+Fig4b <- ggplot(Tac_baseflow_hyst,
+                aes(x = month, 
+                    y = CO2_ppm,
+                    fill = source))+
+  geom_boxplot()+
+  ylab(expression(paste(italic(p), CO[2], ' (ppmv)')))+
+  scale_fill_jco()+
+  theme(axis.title.x = element_blank(),
+        legend.position = c(1, 1), 
+        legend.justification = c(1, 1),
+        legend.background = element_rect(color = 'black'),
+        legend.title = element_blank())
+Fig4b
+
+
+# combine plots
+Fig4 <- plot_grid(Fig4a, Fig4b, 
+                  align = 'v', nrow = 2,
+                  labels = 'auto', label_fontface = 'plain',
+                  hjust = -10)
+Fig4
+```
+
+## Figure 5
+Here, we estimate areal fluxes in the study reach, including net ecosystem production, evasion, and groundwater CO2, all in mol C m^{-2} h^{-1}.
+```{r fig-5}
+Tac_flux <- Tac_all %>%
+  mutate(
+    # calculate H+
+    H = 10^(-1*pH),  # mol/L
+    
+    # temperature-scaled dissociation constants (Mook 1976)
+    k1 = 10^(-1*((3404.71/(temp.water + 273.15)) + (0.032786*(temp.water + 273.15)) - 14.8435)),
+    k2 = 10^(-1*((2902.39/(temp.water + 273.15)) + (0.02379*(temp.water + 273.15)) - 6.4980)),
+    
+    # DIC fractions
+    alpha0 = (1 + (k1/H) + ((k1*k2)/(H^2)))^-1,
+    alpha1 = (1 + (H/k1) + (k2/H))^-1,
+    alpha2 = (1 + (H/k2) + ((H^2)/(k1*k2)))^-1,
+    
+    # temperature-corrected Henry's Law constant (Plummer and Busenberg 1982)
+    kH = 29.41*exp(-2400*(1/(273 + temp.water) - (1/298))), 
+    
+    # in-stream CO2-aq calculations
+    CO2_aq = ((CO2_ppm/1e6)/kH)*1000,      # aqueous CO2: mol CO2 m-3
+    CO2_sat = ((400/1e6)/kH)*1000,         # saturation CO2 at 400 ppm mol CO2 m-3
+    
+    # CO2-well
+    wellCO2_aq = ((wellCO2/1e6)/kH)*1000,  # well aqueous CO2: mol CO2 m-3
+    
+    # DIC partitioning
+    H2CO3 = (1/kH)*(CO2_ppm/1000),      # H2CO3* (mol/m3)
+    TotDIC = H2CO3/alpha0,              # total stream DIC (mol/m3)
+    HCO3 = TotDIC * alpha1,             # HCO3 (mol/m3)
+    
+    # Groundwater discharge (m3 h-1)
+    GW_Q = ifelse(month(Timestamp) == 'April',    # calculate total groundwater discharge (m3/h)
+                  (0.1779*sumQ_m3_hr),            # 17.79% of stream Q in dry season (April); m3/h
+                  (0.0715*sumQ_m3_hr)),           # 7.15% of stream Q in wet season; m3/h
+    
+    # groundwater velocity (m h-1); divide GW discharge by reach area (length * width)
+    GW_v = ifelse(month(Timestamp) == 'April',
+                  GW_Q/(Tac_reach * Tac_width_lower_dry),
+                  GW_Q/(Tac_reach * Tac_width_lower_wet)
+    ),
+    
+    # upreach discharge (m3 h-1); Qu = Qweir - Qgw
     Q_upreach = sumQ_m3_hr - GW_Q, 
     
     # upreach DIC
     upreach_DIC = Q_upreach * (CO2_aq + HCO3), 
     
-    # hydrologic export, hourly CO2_aq and HCO3 * stream discharge
-    CO2_aq_export = ((CO2_aq) * (sumQ_m3_hr)),      # aqueous CO2 export (mol h-1)
-    HCO3_aq_export = (HCO3 * (sumQ_m3_hr)),         # HCO3 export (mol h-1)
-  )
-```
-
-### Net ecosystem production
-This approach is outlined in Hall and Hothkiss (2017)
-``` {r NEP, warning = FALSE}
-Tac_all = Tac_all %>%
-  mutate(
-    ts = log((298.15 - temp.water)/(298.15 + temp.water)), # function as part of O2 saturation, Hall and Hotchkiss (2017), Methods in Stream Ecology
-    u = 10^(8.10765 - (1750.3/(235 + temp.water))), # function as part of O2 saturation
+    # GWCO2 flux (mol CO2 m-2 h-1)
+    GWCO2 = GW_v * wellCO2_aq,
     
-    # calculate O2 saturation; we will also use this for Figure 3
+    # estimate gas exchange based on scaling equations 
+    k600 = (1.74811528*(meanQ_m3_s)^0.7670773)/24,    # hourly gas velocity based on scaline equation
+    K600 = k600/mean_depth,                           # convert to first order coefficient
+    KCO2 = K600*(600/Sc_CO2)^0.7,                     # convert to CO2
+    KO2 = K600*(600/Sc_O2)^0.7,                       # convert to O2
+    
+    # CO2 evasion (mol CO2 m-2 h-1)
+    CO2_efflux = (CO2_aq - CO2_sat)*KCO2*mean_depth,  # hourly CO2 efflux (mol CO2 m-2 h-1)
+    
+    # hydrologic export
+    CO2_aq_export = ((CO2_aq) * (sumQ_m3_hr)),        # aqueous CO2 export (mol C h-1)
+    HCO3_aq_export = (HCO3 * (sumQ_m3_hr)),           # HCO3 export (mol C h-1)
+    
+    # Direct metabolism model 
+    ts = log((298.15 - temp.water)/(298.15 + temp.water)),   # function as part of O2 saturation, Hall and Hotchkiss (2017), Methods in Stream Ecology
+    u = 10^(8.10765 - (1750.3/(235 + temp.water))),          # function as part of O2 saturation
+    
+    # calculate O2 saturation
     Osat = exp(2.00907 +                                     
                  (3.22014*ts) + 
-                 (4.0501*ts^2) +
-                 (4.94457*ts^3) -
+                 (4.0501*ts^2) + 
+                 (4.94457*ts^3) - 
                  (0.256847*ts^4) + 
-                 (3.88767*ts^5)) * ((bp_mmHg-u)/(760-u))*1.42905,
+                 (3.88767*ts^5)) * 
+      ((bp_mmHg - u)/(760 - u))*1.42905,
     
-    # this calculation is in terms of mol C m-2 h-1
-    # we convert to terms of C by assuming a 1:1 molar respiratory quotient and switching the sign; NEP becomes a positive C producing flux rahter than a negative O2 flux
-    direct_met_mol = ifelse(month(Timestamp) == 'April',
-                            (((diff(DO.obs))-((K_O2_dry/24)*(Osat - DO.obs)))*(1/32))*mean_depth*-1,
-                            (((diff(DO.obs))-((K_O2_wet/24)*(Osat - DO.obs)))*(1/32))*mean_depth*-1),
-    )
+    # hourly NEP (mol C m-2 h-1)
+    direct_met_mol = 
+      (diff(DO.obs) - (KO2*(Osat - DO.obs)))*(1/32)*mean_depth*-1   # -1 converts from mol O2 to mol C
+  )
+
+Fig5a <- ggplot(Tac_flux,
+                aes(x = GWCO2*1000, 
+                    y = CO2_efflux*1000))+
+  geom_point(aes(color = factor(month(Timestamp, label = TRUE, abbr = TRUE))),
+             alpha = 0.25)+
+  geom_abline(aes(slope = 1, 
+                  intercept = 0), 
+              linetype = 2)+
+  scale_x_log10(limits = c(1e-10, 1e2),
+                breaks = trans_breaks("log10", function(x) 10^x),
+                labels = trans_format("log10", math_format(10^.x)))+
+  scale_y_log10(limits = c(1e-10, 1e2),
+                breaks = trans_breaks("log10", function(x) 10^x),
+                labels = trans_format("log10", math_format(10^.x)))+
+  scale_color_viridis_d(name = 'Month')+
+  xlab(expression(paste(GW[CO[2]], ' (mmol C ', " ", m^-2," ", h^-1,")")))+
+  ylab(expression(paste('F (mmol C ', " ", m^-2," ", h^-1,")")))+
+  theme(legend.position = 'none')
+Fig5a
+
+Fig5b <- ggplot(Tac_flux , 
+                aes(x = direct_met_mol*1000, 
+                    y = CO2_efflux*1000))+
+  geom_point(aes(color = factor(month(Timestamp, label = TRUE, abbr = TRUE))),
+             alpha = 0.25)+
+  geom_abline(aes(slope = 1, intercept = 0), linetype = 2)+
+  scale_x_log10(limits = c(1e-10, 1e2),
+                breaks = trans_breaks("log10", function(x) 10^x),
+                labels = trans_format("log10", math_format(10^.x)))+
+  scale_y_log10(limits = c(1e-10, 1e2),
+                breaks = trans_breaks("log10", function(x) 10^x),
+                labels = trans_format("log10", math_format(10^.x)))+
+  scale_color_viridis_d(name = 'Month')+
+  xlab(expression(paste('NEP (mmol C ', " ", m^-2," ", h^-1,")")))+
+  ylab(expression(paste('F (mmol C ', " ", m^-2," ", h^-1,")")))+
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))
+Fig5b
+
+Fig5 <- plot_grid(Fig5a, Fig5b,
+                  ncol = 2,
+                  rel_widths = c(0.75, 1),
+                  labels = 'auto', label_fontface = 'plain',
+                  hjust = -8.5, vjust = 1.5)
+Fig5
 ```
 
-### Reach-scale mass balance
-
-$$
-\frac{d[DIC]}{dt} = inputs - outputs = [((Q_d - Q_{GW})*[DIC_u])+(Q_{GW}*[DIC_{GW}])+(NEP*Lwz)] - [(F_{CO2}*Lw) + (Q_d*[DIC_d])]
-$$
-
-``` {r summarise, warning = FALSE}
-Tac_scale = Tac_all %>%
+## Figure 6
+Here, we complete a reach scale volumetric DIC mass balance. The areal fluxes are converted to volumetric fluxes and converted to DIC by means of the carbonate chemistry dissociation constants. We include hydrologic inputs and losses. We plot cumulative inputs and exports and assess the mass balance by means of a change term.
+```{r fig-6}
+Tac_scale <- Tac_flux %>%
   
   # select necessary columns and fluxes
   dplyr::select(Timestamp,
@@ -229,309 +788,37 @@ Tac_scale = Tac_all %>%
                 GWCO2,              # mol CO2 m-2 h-1  
                 CO2_efflux,         # mol CO2 m-2 h-1
                 direct_met_mol,     # mol CO2 m-2 h-1
-                CO2_aq_export, # mol CO2 h-1
-                HCO3_aq_export # mol HCO3 h-1
-                ) %>%   
+                CO2_aq_export,      # mol CO2 h-1
+                HCO3_aq_export      # mol HCO3 h-1
+  ) %>%   
   
-  # convert to mol DIC by dividing by the first partitioning coefficient
-  mutate(GW_DIC = GWCO2/alpha0,                                  # convert to: mol DIC m-2 h-1 
-         F_DIC = CO2_efflux/alpha0,                              # convert to: mol DIC m-2 h-1
-         NEP_DIC = direct_met_mol/alpha0,                        # convert to: mol DIC m-2 h-1 
-         down_DIC = HCO3_aq_export + CO2_aq_export     # convert to: mol DIC h-1
-         ) %>%    
+  # convert to mol DIC
+  mutate(GW_DIC = GWCO2,                              # assumes mol CO2 = mol DIC 
+         F_DIC = CO2_efflux/alpha0,                   # convert to: mol DIC m-2 h-1
+         NEP_DIC = direct_met_mol/alpha0,             # convert to: mol DIC m-2 h-1 
+         down_DIC = HCO3_aq_export + CO2_aq_export    # convert to: mol DIC h-1
+  ) %>%    
   
-  # calculate mass balance terms (equation 4)
+  # calculate mass balance terms
   mutate(DIC_in = upreach_DIC,                                       # mol DIC h-1
          GW_in = ifelse(month(Timestamp) == 'April',
                         GW_DIC*Tac_reach*Tac_width_lower_dry,
-                        GW_DIC*Tac_reach*Tac_width_lower_wet),       # mol DIC h-1
+                        GW_DIC*Tac_reach*Tac_width_lower_wet),             # mol DIC h-1
          NEP_in = ifelse(month(Timestamp) == 'April',
                          NEP_DIC*Tac_reach*Tac_width_lower_dry,
-                         NEP_DIC*Tac_reach*Tac_width_lower_wet),     # mol DIC h-1
+                         NEP_DIC*Tac_reach*Tac_width_lower_wet),           # mol DIC h-1
          
-         DIC_out = down_DIC,                                         # mol DIC h-1
+         DIC_out = down_DIC,                                       # mol DIC h-1
          F_out = ifelse(month(Timestamp) == 'April',
                         F_DIC*Tac_reach*Tac_width_lower_dry,
-                        F_DIC*Tac_reach*Tac_width_lower_wet),        # mol DIC h-1
+                        F_DIC*Tac_reach*Tac_width_lower_wet),              # mol DIC h-1
          
          dC_dt = (DIC_in + NEP_in + GW_in) - 
            (F_out + DIC_out)
-         ) 
-```
+  ) 
 
-
-## Figures
-### Fig 2
-``` {r fig2-sensor-data, warning = FALSE}
-# panel a) daily rainfall
-rain_plot = ggplot(Tac_all %>%
-                     group_by(Date = date(Timestamp)) %>%
-                     summarise(dayRain = sum(Rainfall, na.rm = TRUE)), 
-                   aes(x = as.POSIXct(Date)))+
-  geom_bar(aes(y = dayRain), stat = 'identity', fill = 'black')+
-  ylim(120, 0)+
-  ylab('Daily Rainfall (mm)')+
-  scale_x_datetime(date_breaks = "1 month", date_labels =  "%b")+
-  theme(axis.title.x = element_blank())
-
-# panel b) mean hourly discharge
-Q_plot = ggplot(Tac_all, aes(x = Timestamp))+
-  geom_line(aes(y = meanQ_m3_s), 
-            color = 'black')+
-  geom_line(aes(y = GW_Q/60), 
-            color = 'red')+        
-  ylab(expression(paste("Discharge (", m^3," ", s^-1,")")))+
-  scale_color_manual(values = c('black', 
-                                'red'))+
-  scale_x_datetime(date_breaks = "1 month", 
-                   date_labels =  "%b")+
-  theme(axis.title.x = element_blank())+
-  annotate('text', 
-           x = as.POSIXct(c('2013-04-6 00:00',
-                 '2013-06-17 00:00',
-                 '2013-08-21 00:00')),
-           y = 0.15,
-           label = "*",
-           size = 8)
-
-# panel c) dissolved oxygen
-DO = ggplot(data = Tac_all, aes(x = Timestamp))+
-  geom_point(aes(y = DO.obs))+
-  labs(x = "Time", y = expression(paste("DO (mg " ,L^{-1},")")))+
-  #ylim(0,8.5)+
-  theme(axis.title.x = element_blank())+
-  scale_x_datetime(date_breaks = "1 month", labels = date_format("%b"))
-
-# panel d) stream pCO2
-strCO2_plot = ggplot(Tac_all, aes(x = Timestamp))+
-  geom_point(aes(y = CO2_ppm), color = 'black')+
-  ylab(expression(paste("Stream ", CO[2]," ", "(ppmv)")))+
-  scale_x_datetime(date_breaks = "1 month", date_labels =  "%b")+
-  theme(axis.title.x = element_blank())
-
-# panel e) well pCO2
-wellCO2_plot = ggplot(Tac_all, aes(x = Timestamp))+
-  geom_point(aes(y = wellCO2), color = 'black')+
-  ylab(expression(paste("Well ", CO[2]," ", "(ppmv)")))+
-  scale_x_datetime(date_breaks = "1 month", date_labels =  "%b")+
-  theme(axis.title.x = element_blank())+
-  ylim(30000, 50000)
-
-# combine into Fig 2
-plot_grid(rain_plot, Q_plot, DO, strCO2_plot, wellCO2_plot,
-          nrow = 5,
-          align = 'hv',
-          labels = 'auto', hjust = -9, vjust = 2)
-```
-
-### Fig 3
-``` {r fig-3-departure, warning = FALSE}
-
-# subset the data and calculate the departure in umol L-1
-Tac_departure = Tac_all %>%
-  dplyr::select(Timestamp, Osat, DO.obs, CO2_aq, CO2_sat) %>%
-  mutate(CO2_dep = (CO2_aq - CO2_sat)*1000,          # umol/L
-         O2_dep = ((DO.obs - Osat)/32)*1000)         # umol/L
-
-# calculate ellipsis for all data 
-Tac_dep_clean = na.omit(Tac_departure)
-Tac_dep_clean$month = lubridate::month(Tac_dep_clean$Timestamp,
-                                       abbr = TRUE, label = TRUE)
-
-# calculate info for Table 2
-Tac_mu = c(mean(Tac_dep_clean$CO2_dep, na.rm = TRUE),
-           mean(Tac_dep_clean$O2_dep, na.rm = TRUE))
-Tac_corMat = cor(cbind(Tac_dep_clean$CO2_dep,
-                       Tac_dep_clean$O2_dep))
-Tac_covMat = cov(cbind(Tac_dep_clean$CO2_dep,
-                       Tac_dep_clean$O2_dep))
-Tac_evals = eigen(Tac_covMat)$values
-Tac_ell_length = 2*sqrt(5.991*Tac_evals)
-
-
-Tac_reg = lmodel2(data = Tac_dep_clean,
-                  O2_dep ~ CO2_dep, nperm = 99)
-
-Tac_inter = Tac_reg$regression.results[2,2]
-Tac_slope = Tac_reg$regression.results[2,3]
-Tac_corr = Tac_reg$r
-
-Tac_metrics = data.frame(meanCO2dep = Tac_mu[1],
-                         meanO2dep = Tac_mu[2],
-                         offset = Tac_mu[1] + Tac_mu[2],
-                         EQ = 1/abs(Tac_slope),
-                         width = Tac_ell_length[2],
-                         stretch = Tac_ell_length[1])
-Tac_metrics
-
-# plot for all data points with 95% CI ellipsis 
-all_dep = ggplot()+
-  geom_point(alpha = 0.2, 
-             data = Tac_departure, 
-             aes(x = CO2_dep, y = O2_dep, 
-                 color = factor(month(Timestamp))))+
-  geom_hline(yintercept = 0)+
-  geom_vline(xintercept = 0)+
-  geom_abline(intercept = 0, slope = -1, linetype = 2)+
-  xlim(-20, 400)+
-  ylim(-400, 20)+
-  xlab(expression(paste(CO[2], " Departure (µM)")))+
-  ylab(expression(paste(O[2], " Departure (µM)")))+
-  guides(colour = guide_legend(override.aes = list(alpha = 1)))+
-  scale_color_jco(name = "Month",
-                  labels = c("Apr", "May", "Jun", "Jul", "Aug", "Sep"))
-all_dep
-```
-
-### Fig 4
-```{r fig-4-hysteresis, warning = FALSE}
-
-# subset the dry season rainfall event
-event_dry = Tac_all %>%
-  dplyr::filter(Timestamp > "2013-04-05 06:00:00",
-                Timestamp < "2013-04-06 15:00:00") %>%
-  dplyr::select(Timestamp, meanQ_m3_s, Rainfall, CO2_ppm, DO.obs, wellCO2) %>%
-  dplyr::mutate(obs = 1:dplyr::n())
-
-# time series of the event
-ggplot(event_dry, aes(Timestamp, meanQ_m3_s))+
-  geom_line()
-
-hyst_dry = ggplot(event_dry, 
-                  aes(x = meanQ_m3_s, y = CO2_ppm,color = obs))+
-  geom_point(size = 1)+
-  geom_path(linejoin = "round", lineend = "square",
-            arrow = arrow(angle = 30, 
-                          ends = 'last', 
-                          type = 'closed',
-                          length = unit(0.1, 'inch')))+
-  scale_color_viridis_c(name = "Hour")+
-  ylab(expression(paste(pCO[2], " (ppmv)")))+
-  xlab(expression(paste("Discharge (", m^3," ", s^{-1},")")))+
-  scale_y_continuous(limits = c(3000, 9000),
-                     breaks = c(3000, 6000, 9000),
-                     labels = c(3000, 6000, 9000))
-
-
-# early wet season event 
-## subset data
-event_earlyWet = Tac_all %>%
-  dplyr::filter(Timestamp > "2013-06-16 10:00:00",
-                Timestamp < "2013-06-18 00:00:00") %>%
-  dplyr::select(Timestamp, meanQ_m3_s, Rainfall, CO2_ppm, DO.obs, wellCO2) %>%
-  dplyr::mutate(obs = 1:dplyr::n())
-
-# plot the hydrograph
-ggplot(event_earlyWet, aes(Timestamp, meanQ_m3_s))+
-  geom_line()
-
-# Hysteresis plot
-hyst_earlyWet = ggplot(event_earlyWet, aes(x = meanQ_m3_s, y = CO2_ppm,
-                      color = obs))+
-  geom_point(size = 1)+
-  geom_path(linejoin = "round", lineend = "square",
-            arrow = arrow(angle = 30, 
-                          ends = 'last', 
-                          type = 'closed',
-                          length = unit(0.1, 'inch')))+
-  scale_color_viridis_c(name = "Hour")+
-  ylab(expression(paste(pCO[2], " (ppmv)")))+
-  xlab(expression(paste("Discharge (", m^3," ", s^{-1},")")))+
-  scale_y_continuous(limits = c(3000, 9000),
-                     breaks = c(3000, 6000, 9000),
-                     labels = c(3000, 6000, 9000))
-
-# late wet season event ----
-
-event_lateWet = Tac_all %>%
-  dplyr::filter(Timestamp > "2013-08-21 03:00:00",
-                Timestamp < "2013-08-23 00:00:00") %>%
-  dplyr::select(Timestamp, meanQ_m3_s, Rainfall, CO2_ppm, DO.obs, wellCO2) %>%
-  dplyr::mutate(obs = 1:dplyr::n())
-
-# hydrograph
-ggplot(event_lateWet, aes(Timestamp, meanQ_m3_s))+
-  geom_line()
-
-# Hysteresis plot
-hyst_lateWet = ggplot(event_lateWet, aes(x = meanQ_m3_s, y = CO2_ppm,
-                           color = obs))+
-  geom_point(size = 1)+
-  geom_path(linejoin = "round", lineend = "square",
-            arrow = arrow(angle = 30, 
-                          ends = 'last', 
-                          type = 'closed',
-                          length = unit(0.1, 'inch')))+
-  scale_color_viridis_c(name = "Hour",
-                        labels = c(0, 10, 20, 30, 40, 50),
-                        breaks = c(0, 10, 20, 30, 40, 50))+
-  ylab(expression(paste(pCO[2], " (ppmv)")))+
-  xlab(expression(paste("Discharge (", m^3," ", s^{-1},")")))+
-  scale_y_continuous(limits = c(3000, 9000),
-                     breaks = c(3000, 6000, 9000),
-                     labels = c(3000, 6000, 9000))
-
-Fig4 = plot_grid(hyst_dry, hyst_earlyWet, hyst_lateWet,
-          ncol = 3, nrow = 1,
-          labels = 'auto', label_fontface = 'plain',
-          hjust = c(-8, -8, -9))
-Fig4
-```
-
-### Fig 5
-```{r fig-5-areal-fluxes, warning = FALSE}
-F_from_GW = ggplot(Tac_scale,
-                   aes(x = GWCO2*1000, 
-                       y = CO2_efflux*1000))+                     # convert to mmol
-  geom_point(aes(color = factor(month(Timestamp, 
-                                      label = TRUE, abbr = TRUE))),
-             alpha = 0.25)+
-  geom_abline(aes(slope = 1, intercept = 0), 
-              linetype = 2)+
-  scale_x_log10(limits = c(1e-9, 1e2),
-                breaks = trans_breaks("log10", function(x) 10^x),
-                labels = trans_format("log10", math_format(10^.x)))+
-  scale_y_log10(limits = c(1e-1, 1e2),
-                breaks = trans_breaks("log10", function(x) 10^x),
-                labels = trans_format("log10", math_format(10^.x)))+
-  scale_color_viridis_d(name = 'Month')+
-  xlab(expression(paste(GW[CO[2]], ' (mmol C ', " ", m^-2," ", h^-1,")")))+
-  ylab(expression(paste('F (mmol C ', " ", m^-2," ", h^-1,")")))+
-  theme(legend.position = 'none')
-F_from_GW
-
-F_from_NEP = ggplot(Tac_scale , 
-                    aes(x = direct_met_mol*1000, 
-                        y = CO2_efflux*1000))+
-  geom_point(aes(color = factor(month(Timestamp, 
-                                      label = TRUE, abbr = TRUE))),
-             alpha = 0.25)+
-  geom_abline(aes(slope = 1, intercept = 0), 
-              linetype = 2)+
-  scale_x_log10(limits = c(1e-3, 1e3),
-                breaks = trans_breaks("log10", function(x) 10^x),
-                labels = trans_format("log10", math_format(10^.x)))+
-  scale_y_log10(limits = c(1e-1, 1e2),
-                breaks = trans_breaks("log10", function(x) 10^x),
-                labels = trans_format("log10", math_format(10^.x)))+
-  scale_color_viridis_d(name = 'Month')+
-  xlab(expression(paste('NEP (mmol C ', " ", m^-2," ", h^-1,")")))+
-  ylab(expression(paste('F (mmol C ', " ", m^-2," ", h^-1,")")))+
-  guides(colour = guide_legend(override.aes = list(alpha = 1)))
-F_from_NEP
-
-Fig5 = plot_grid(F_from_GW, F_from_NEP,
-                  ncol = 2,
-                  rel_widths = c(0.75, 1),
-                  labels = 'auto', label_fontface = 'plain',
-                  hjust = -8.5, vjust = 1.5)
-Fig5
-```
-
-### Fig 6
-```{r DIC-mass-balance, warning = FALSE}
-Tac_scaled_in = ggplot(Tac_scale, 
-       aes(x = Timestamp))+
+Tac_scaled_in <- ggplot(Tac_scale, 
+                        aes(x = Timestamp))+
   geom_point(aes(y = DIC_in, color = 'Upstream'), alpha = 0.2)+
   geom_point(aes(y = GW_in, color = 'GW'), alpha = 0.2)+
   geom_point(aes(y = NEP_in, color = 'NEP'), alpha = 0.2)+
@@ -547,9 +834,9 @@ Tac_scaled_in = ggplot(Tac_scale,
         axis.title.x = element_blank())+
   guides(colour = guide_legend(override.aes = list(alpha = 1)))
 Tac_scaled_in
- 
-Tac_scaled_out = ggplot(Tac_scale, 
-       aes(x = Timestamp))+
+
+Tac_scaled_out <- ggplot(Tac_scale, 
+                         aes(x = Timestamp))+
   geom_point(aes(y = F_out, color = 'Evasion'), alpha = 0.2)+
   geom_point(aes(y = DIC_out, color = 'Export'), alpha = 0.2)+
   scale_color_manual(values = c("#CD534CFF", "#7AA6DCFF"))+
@@ -565,7 +852,7 @@ Tac_scaled_out = ggplot(Tac_scale,
   guides(colour = guide_legend(override.aes = list(alpha = 1)))
 Tac_scaled_out
 
-Tac_scaled_dCdt = ggplot(Tac_scale)+
+Tac_scaled_dCdt <- ggplot(Tac_scale)+
   geom_density(aes(x = dC_dt), fill = 'grey')+
   xlab(expression(paste("dDIC ", dt^-1, ' (mol DIC ', h^-1, ')')))+
   ylab('Count')+
@@ -573,56 +860,71 @@ Tac_scaled_dCdt = ggplot(Tac_scale)+
   coord_flip()
 Tac_scaled_dCdt
 
-Fig6 = plot_grid(plot_grid(Tac_scaled_in, Tac_scaled_out,
-                    nrow = 2, align = 'hv',
-                    labels = 'auto', label_fontface = 'plain',
-                    hjust = -8, vjust = 1.75),
-          Tac_scaled_dCdt,
-          ncol = 2,
-          rel_widths = c(3,1),
-          labels = c('', 'c'), label_fontface = 'plain',
-          hjust = -8,
-          align = 'hv')
+Fig6 <- plot_grid(plot_grid(Tac_scaled_in, Tac_scaled_out,
+                            nrow = 2, align = 'hv',
+                            labels = 'auto', label_fontface = 'plain',
+                            hjust = -8, vjust = 1.75),
+                  Tac_scaled_dCdt,
+                  ncol = 2,
+                  rel_widths = c(3,1),
+                  labels = c('', 'c'), label_fontface = 'plain',
+                  hjust = -9,
+                  align = 'hv')
 Fig6
+
 ```
 
-### Fig 7
-```{r fig-7, warning = FALSE}
-
-Tac_corr = Tac_scale %>% 
+## Table 3
+Here, we assess the influence of rainfall on volumetric fluxes using the Pearson correlation coefficient. 
+```{r table-3}
+Tac_corr <- Tac_scale %>% 
   group_by(Timestamp = date(Timestamp)) %>%
-  summarise(sumGW = sum(GWCO2, na.rm = TRUE),
-            sumF = sum(CO2_efflux, na.rm = TRUE),
-            sumNEP = sum(direct_met_mol, na.rm = TRUE),
-            sumDICin = sum(DIC_in, na.rm = TRUE),
-            sumDICout = sum(DIC_out, na.rm = TRUE),
-            sumrain = sum(Rainfall, na.rm = TRUE),
-            meanpH = mean(pH, na.rm = TRUE),
-            sdpH = sd(pH, na.rm = TRUE),
-            efflux = sum(CO2_efflux, na.rm = TRUE))
+  summarise(
+    #fluxes
+    sumGW = sum(GWCO2, na.rm = TRUE),
+    sumF = sum(CO2_efflux, na.rm = TRUE),
+    sumNEP = sum(direct_met_mol, na.rm = TRUE),
+    sumDICin = sum(DIC_in, na.rm = TRUE),
+    sumDICout = sum(DIC_out, na.rm = TRUE),
+    
+    # rainfall        
+    sumrain = sum(Rainfall, na.rm = TRUE),
+    
+    # pH        
+    meanpH = mean(pH, na.rm = TRUE),
+    sdpH = sd(pH, na.rm = TRUE)
+  )
 
-cor.test(y = Tac_corr$sumGW, x = Tac_corr$sumrain,   # p < 0.15, t = 0.08
-         method = 'kendall') 
-cor.test(y = Tac_corr$sumDICin, x = Tac_corr$sumrain,   # p < 0.01, t = 0.16
-         method = 'kendall') 
-cor.test(y = Tac_corr$sumNEP, x = Tac_corr$sumrain,   # p < 0.78, t = -0.01
-         method = 'kendall') 
-cor.test(y = Tac_corr$sumF, x = Tac_corr$sumrain,   # p < 0.37, t = 0.05
-         method = 'kendall') 
-cor.test(y = Tac_corr$sumDICout, x = Tac_corr$sumrain,   # p < 0.01, t = 0.16
-         method = 'kendall') 
+cor.test(y = Tac_corr$sumGW, 
+         x = Tac_corr$sumrain,   
+         method = 'pearson') 
+cor.test(y = Tac_corr$sumDICin, 
+         x = Tac_corr$sumrain,   
+         method = 'pearson') 
+cor.test(y = Tac_corr$sumNEP, 
+         x = Tac_corr$sumrain,   
+         method = 'pearson') 
+cor.test(y = Tac_corr$sumF, 
+         x = Tac_corr$sumrain,  
+         method = 'pearson') 
+cor.test(y = Tac_corr$sumDICout, 
+         x = Tac_corr$sumrain,   
+         method = 'pearson') 
 
-# correlate GWCO2 with pH
+```
 
+## Figure 7
+Finally, we determine the effect of groundwater DIC inputs to the reach as drivers of pH decreases, both at seasonal and episodic scales.
+```{r fig-7}
 summary(lm(data = Tac_corr %>%
              filter(sumGW > 1e-5),
            meanpH ~ log10(sumGW))
-        )
+)
 
-Fig7 = ggplot(Tac_corr %>%
-         filter(sumGW > 1e-5), 
-       aes(x = sumGW,
-           y = meanpH))+
+Fig7 <- ggplot(Tac_corr %>%
+                 filter(sumGW > 1e-5), 
+               aes(x = sumGW,
+                   y = meanpH))+
   geom_point(aes(color = month(Timestamp, label = TRUE, abbr = TRUE)))+
   geom_errorbar(aes(ymin = meanpH - sdpH,
                     ymax = meanpH + sdpH,
@@ -640,51 +942,161 @@ Fig7 = ggplot(Tac_corr %>%
   annotate(x = 0.1, y = 4, 'text', label = expression(italic("p < 0.01")))+
   annotate(x = 0.1, y = 4.2, 'text', label = expression(italic(paste(R^2,"= 0.06"))))
 Fig7
+
 ```
 
+## Figure S5
+Here, we perform a sensitivity analysis on areal fluxes. We determine to what extent variation in 1) gas exchange influences changes in F[CO2] and NEP and 2) groundwater discharge influences groudwater CO2 inputs. We explore variation at +-5% and +-25% of parameter values.
+```{r fig s5}
+Tac_sens_gas <- Tac_flux %>%
+  dplyr::select(Timestamp,                    # timestamp
+                mean_depth,                   # for unit conversions
+                k600, K600, KCO2, KO2,        # gas exchange measures
+                CO2_aq, CO2_sat, CO2_efflux,  # CO2 efflux related measurements
+                DO.obs, Osat, nep = direct_met_mol) # NEP related measurements
 
-## Supplemental Figure
+Tac_sens_gas_calc <- Tac_sens_gas %>%
+  mutate(
+    # modulate KCO2 by +- 25%
+    KCO2_75 = KCO2 * 0.75,
+    KCO2_95 = KCO2 * 0.95,
+    KCO2_105 = KCO2 * 1.05,
+    KCO2_125 = KCO2 * 1.25,
+    # modulate KO2 by +- 25%
+    KO2_75 = KO2 * 0.75,
+    KO2_95 = KO2 * 0.95,
+    KO2_105 = KO2 * 1.05,
+    KO2_125 = KO2 * 1.25,
+    # recalculate efflux with modulated KCO2s
+    #CO2_efflux = CO2_efflux
+    CO2_efflux_75 = ((CO2_aq - CO2_sat)*KCO2_75*mean_depth)*1000,
+    CO2_efflux_95 = ((CO2_aq - CO2_sat)*KCO2_95*mean_depth)*1000,
+    CO2_efflux_105 = ((CO2_aq - CO2_sat)*KCO2_105*mean_depth)*1000,
+    CO2_efflux_125 = ((CO2_aq - CO2_sat)*KCO2_125*mean_depth)*1000,
+    # recalculate NEP with modulated KO2s
+    nep_75 = ((diff(DO.obs) - (KO2_75*(Osat - DO.obs)))*(1/32)*mean_depth*-1)*1000,
+    nep_95 = ((diff(DO.obs) - (KO2_95*(Osat - DO.obs)))*(1/32)*mean_depth*-1)*1000,
+    nep_105 = ((diff(DO.obs) - (KO2_105*(Osat - DO.obs)))*(1/32)*mean_depth*-1)*1000,
+    nep_125 = ((diff(DO.obs) - (KO2_125*(Osat - DO.obs)))*(1/32)*mean_depth*-1)*1000
+  )
 
-```{r fig-S1, warning = FALSE}
-# temperature
-tempHour = ggplot(Tac_all, aes(x = hour(Timestamp), y = temp.water))+
-  geom_line(alpha = 0.5, aes(group = yday(Timestamp), color = yday(Timestamp)))+
-  geom_point(alpha = 0.5, aes(group = yday(Timestamp), color = yday(Timestamp)))+
-  xlab('Hour')+
-  scale_colour_viridis_c(name = "Julian Day")+
-  theme(legend.title = element_text(face = 'plain'))+
-  ylab("Temperature (°C)")
+# plot: CO2 efflux sensitivity analysis
+ggplot(Tac_sens_gas_calc,
+       aes(x = Timestamp))+
+  geom_line(aes(y = CO2_efflux_75,
+                 color = '-25%'))+
+  geom_line(aes(y = CO2_efflux_125,
+                 color = '+25%'))+
+  geom_line(aes(y = CO2_efflux),
+            color = 'black')+
+  scale_y_log10()
 
-# pH
-pHHour = ggplot(Tac_all, aes(x = hour(Timestamp), y = pH))+
-  geom_line(alpha = 0.5, aes(group = yday(Timestamp), color = yday(Timestamp)))+
-  geom_point(alpha = 0.5, aes(group = yday(Timestamp), color = yday(Timestamp)))+
-  labs(x = 'Hour', y = "pH")+
-  scale_colour_viridis_c(name = "Julian Day")+
-  theme(legend.title = element_text(face = 'plain'))
+plot_sens_FCO2 <- ggplot(Tac_sens_gas_calc,
+       aes(x = CO2_efflux*1000))+
+  geom_point(aes(y = CO2_efflux_75,
+                 color = '-25%'))+
+  geom_point(aes(y = CO2_efflux_95,
+                 color = '-5%'))+
+  geom_point(aes(y = CO2_efflux_105,
+                 color = '+5%'))+
+  geom_point(aes(y = CO2_efflux_125,
+                 color = '+25%'))+
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed')+
+  labs(x = 'FCO2 (mmol/m2/h)',
+       y = 'Varied FCO2 (mmol/m2/h')+
+  lims(x = c(0, 12),
+       y  = c(0, 12))+
+  theme(legend.title = element_blank())
+plot_sens_FCO2
 
-# stream CO2, ppm
-CO2Hour = ggplot(Tac_all, aes(x = hour(Timestamp), y = CO2_ppm))+
-  geom_line(alpha = 0.5, aes(group = yday(Timestamp), color = yday(Timestamp)))+
-  geom_point(alpha = 0.5, aes(group = yday(Timestamp), color = yday(Timestamp)))+
-  xlab('Hour')+
-  ylab(expression(paste(pCO[2], ' (ppmv)')))+
-  scale_colour_viridis_c(name = "Julian Day")+
-  theme(legend.title = element_text(face = 'plain'))
+# as boxplots
+Tac_sens_gas_calc %>%
+  dplyr::select(CO2_efflux_75,CO2_efflux_95,CO2_efflux, CO2_efflux_105,CO2_efflux_125) %>% 
+  tidyr::pivot_longer(everything(),
+                           names_to = 'flux', values_to = 'value') %>%
+  ggplot(aes(x = flux, y = value))+
+  geom_boxplot()
+# change in gas exchange increases the highest rates of evasion
 
-# dissolved oxygen
-DOHour = ggplot(Tac_all, aes(x = hour(Timestamp), y = DO.obs))+
-  geom_line(alpha = 0.5, aes(group = yday(Timestamp), color = yday(Timestamp)))+
-  geom_point(alpha = 0.5, aes(group = yday(Timestamp), color = yday(Timestamp)))+
-  xlab('Hour')+
-  ylab(expression(paste(O[2], " (mg "," ",L^{-1},")")))+
-  scale_colour_viridis_c(name = 'Julian Day')+
-  theme(legend.title = element_text(face = 'plain'))
+# plot: NEP sensitivity analysis
+plot_sens_nep <- ggplot(Tac_sens_gas_calc,
+       aes(x = nep*1000))+
+  geom_point(aes(y = nep_75,
+                 color = '-25%'),
+             alpha = 0.5)+
+  geom_point(aes(y = nep_95,
+                 color = '-5%'),
+             alpha = 0.5)+
+  geom_point(aes(y = nep_105,
+                 color = '+5%'),
+             alpha = 0.5)+
+  geom_point(aes(y = nep_125,
+                 color = '+25%'),
+             alpha = 0.5)+
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed')+
+  labs(x = 'NEP (mmol/m2/h)',
+       y = 'Varied NEP (mmol/m2/h)')+
+  theme(legend.title = element_blank())
+plot_sens_nep
 
-FigS1 = plot_grid(tempHour, pHHour, CO2Hour, DOHour,
-                  ncol = 2, nrow = 2, align = 'hv',
-                  labels = 'auto')
-FigS1
+Tac_sens_gas_calc %>%
+  dplyr::select(nep,nep_75,nep_125, nep_95,nep_105) %>% 
+  tidyr::pivot_longer(everything(),
+                      names_to = 'flux', values_to = 'value') %>%
+  ggplot(aes(x = flux, y = value))+
+  geom_boxplot()
+# gas exchange does not exert much control on NEP in the study reach
+
+
+# on groundwater flux
+Tac_sens_gw <- Tac_flux %>%
+  dplyr::select(Timestamp,           # timestamp
+                wellCO2_aq, GWCO2,  # aqueous CO2 in the well (mol/m3) and GWCO2 (mol/h)
+                GW_v)               # groundwater discharge (m3/h)
+
+Tac_sens_gw_calc <- Tac_sens_gw %>%
+  mutate(
+    GW_v_75 = GW_v * 0.75,
+    GW_v_95 = GW_v * 0.95,
+    GW_v_105 = GW_v * 1.05,
+    GW_v_125 = GW_v * 1.25,
+    GWCO2_75 = GW_v_75*wellCO2_aq,
+    GWCO2_95 = GW_v_95*wellCO2_aq,
+    GWCO2_105 = GW_v_105*wellCO2_aq,
+    GWCO2_125 = GW_v_125*wellCO2_aq
+  )
+
+plot_sens_gw <- ggplot(Tac_sens_gw_calc,
+       aes(x = GWCO2))+
+  geom_point(aes(y = GWCO2_75,
+                 color = '-25%'))+
+  geom_point(aes(y = GWCO2_95,
+                 color = '-5%'))+
+  geom_point(aes(y = GWCO2_105,
+                 color = '+5%'))+
+  geom_point(aes(y = GWCO2_125,
+                 color = '+25%'))+
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed')+
+  labs(x = 'Groundwater Q (m3/h)',
+       y = 'Varied Groundwater Q (m3/h)')+
+  theme(legend.title = element_blank())
+plot_sens_gw
+
+Tac_sens_gw_calc %>%
+  dplyr::select(GWCO2,GWCO2_75,GWCO2_95, GWCO2_105,GWCO2_125) %>% 
+  tidyr::pivot_longer(everything(),
+                      names_to = 'flux', values_to = 'value') %>%
+  ggplot(aes(x = flux, y = value))+
+  geom_boxplot()
+# GW velocity, and by proxy GW discharge, influence the input of CO2 from 
+
+FigS5 <- plot_grid(plot_sens_FCO2,
+                   plot_sens_nep,
+                   plot_sens_gw,
+                   labels = 'auto', label_fontface = 'plain',
+                   ncol = 3, align = 'hv',
+                   hjust = -8)
+FigS5
 ```
 
 ## Session info
