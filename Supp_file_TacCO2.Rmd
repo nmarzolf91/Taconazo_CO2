@@ -564,7 +564,7 @@ Tac_baseflow <- baseflows(Tac_all %>%
                           ts = 'daily') %>%
   mutate(bfi = bf/Q,
          stormflow = Q - bf,
-         source = ifelse(bfi > 0.5,
+         source = ifelse(bfi >= 0.5,
                          'Baseflow',
                          'Storm Flow'),
          month = month(Date, label = TRUE, abbr = TRUE)) %>%
@@ -991,6 +991,7 @@ ggplot(Tac_sens_gas_calc,
             color = 'black')+
   scale_y_log10()
 
+
 plot_sens_FCO2 <- ggplot(Tac_sens_gas_calc,
        aes(x = CO2_efflux*1000))+
   geom_point(aes(y = CO2_efflux_75,
@@ -1006,7 +1007,8 @@ plot_sens_FCO2 <- ggplot(Tac_sens_gas_calc,
        y = 'Varied FCO2 (mmol/m2/h')+
   lims(x = c(0, 12),
        y  = c(0, 12))+
-  theme(legend.title = element_blank())
+  theme(legend.title = element_blank())+
+  ggtitle('Sensitivity of FCO2 to KCO2')
 plot_sens_FCO2
 
 # as boxplots
@@ -1036,7 +1038,8 @@ plot_sens_nep <- ggplot(Tac_sens_gas_calc,
   geom_abline(slope = 1, intercept = 0, linetype = 'dashed')+
   labs(x = 'NEP (mmol/m2/h)',
        y = 'Varied NEP (mmol/m2/h)')+
-  theme(legend.title = element_blank())
+  theme(legend.title = element_blank())+
+  ggtitle('Sensitivity of NEP to KCO2')
 plot_sens_nep
 
 Tac_sens_gas_calc %>%
@@ -1079,7 +1082,8 @@ plot_sens_gw <- ggplot(Tac_sens_gw_calc,
   geom_abline(slope = 1, intercept = 0, linetype = 'dashed')+
   labs(x = 'Groundwater Q (m3/h)',
        y = 'Varied Groundwater Q (m3/h)')+
-  theme(legend.title = element_blank())
+  theme(legend.title = element_blank())+
+  ggtitle('Sensitivity of GWCO2 to GW Discharge')
 plot_sens_gw
 
 Tac_sens_gw_calc %>%
@@ -1090,12 +1094,62 @@ Tac_sens_gw_calc %>%
   geom_boxplot()
 # GW velocity, and by proxy GW discharge, influence the input of CO2 from 
 
+# evaluate depth on FCO2 and NEP
+Tac_sens_depth <- Tac_flux %>% 
+  select(Timestamp, mean_depth, 
+         CO2_aq, CO2_sat, KCO2, CO2_efflux,
+         DO.obs, Osat, KO2, direct_met_mol) %>%
+  mutate(depth_75 = mean_depth * 0.75,
+         depth_95 = mean_depth * 0.95,
+         depth_105 = mean_depth * 1.05,
+         depth_125 = mean_depth * 1.25,
+         
+         CO2_efflux_75 = (CO2_aq - CO2_sat)*KCO2*depth_75*1000,
+         CO2_efflux_95 = (CO2_aq - CO2_sat)*KCO2*depth_95*1000,
+         CO2_efflux_105 = (CO2_aq - CO2_sat)*KCO2*depth_105*1000,
+         CO2_efflux_125 = (CO2_aq - CO2_sat)*KCO2*depth_125*1000,
+         
+         NEP_75 = ((diff(DO.obs) - (KO2*(Osat - DO.obs)))*(1/32)*depth_75*-1)*1000,
+         NEP_95 = ((diff(DO.obs) - (KO2*(Osat - DO.obs)))*(1/32)*depth_95*-1)*1000,
+         NEP_105 = ((diff(DO.obs) - (KO2*(Osat - DO.obs)))*(1/32)*depth_105*-1)*1000,
+         NEP_125 = ((diff(DO.obs) - (KO2*(Osat - DO.obs)))*(1/32)*depth_125*-1)*1000
+         )
+
+plot_sens_FCO2_depth <- ggplot(data = Tac_sens_depth,
+                               aes(x = CO2_efflux*1000))+
+  geom_point(aes(y = CO2_efflux_75, color = '-25%'))+
+  geom_point(aes(y = CO2_efflux_95, color = '-5%'))+
+  geom_point(aes(y = CO2_efflux_105, color = '+5%'))+
+  geom_point(aes(y = CO2_efflux_125, color = '+25%'))+
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed')+
+  labs(x = 'FCO2 (mmol C m-2 h-1)',
+       y = 'Varied FCO2 (mmol C m-2 h-1)')+
+  theme(legend.title = element_blank())+
+  ggtitle('Sensitivity of FCO2 to Depth')
+plot_sens_FCO2_depth
+
+plot_sens_NEP_depth <- ggplot(data = Tac_sens_depth,
+                               aes(x = direct_met_mol*1000))+
+  geom_point(aes(y = NEP_75, color = '-25%'))+
+  geom_point(aes(y = NEP_95, color = '-5%'))+
+  geom_point(aes(y = NEP_105, color = '+5%'))+
+  geom_point(aes(y = NEP_125, color = '+25%'))+
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed')+
+  labs(x = 'NEP (mmol C m-2 h-1)',
+       y = 'Varied NEP (mmol C m-2 h-1)')+
+  theme(legend.title = element_blank())+
+  ggtitle('Sensitivity of NEP to Depth')
+plot_sens_NEP_depth
+  
+
 FigS5 <- plot_grid(plot_sens_FCO2,
                    plot_sens_nep,
                    plot_sens_gw,
+                   plot_sens_FCO2_depth,
+                   plot_sens_NEP_depth,
                    labels = 'auto', label_fontface = 'plain',
-                   ncol = 3, align = 'hv',
-                   hjust = -8)
+                   nrow = 3, ncol = 2, align = 'hv',
+                   hjust = -8, vjust = 4)
 FigS5
 ```
 
