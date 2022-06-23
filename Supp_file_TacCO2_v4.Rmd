@@ -524,8 +524,8 @@ Fig6_F <- ggplot(Tac_fluxes %>%
   geom_line()+
   scale_x_datetime(date_breaks = "1 month", 
                    date_labels =  "%b")+
-  scale_y_continuous(breaks = c(0, 0.25, 0.5, 0.75, 1),
-                     labels = c(0, 0.25, 0.5, 0.75, 1),
+  scale_y_continuous(breaks = c(0, 0.25,0.50,0.75,1.0),
+                     labels = c(0, 0.25,0.50,0.75,1.0),
                      limits = c(0, 1))+
   labs(x = element_blank(),
        y = expression(paste(F[CO2], ' (mol  ', CO[2],' ', m^-2,' ', d^-1, ')')))
@@ -541,8 +541,8 @@ Fig6_GW <- ggplot(Tac_fluxes %>%
   ))+
   scale_x_datetime(date_breaks = "1 month", 
                    date_labels =  "%b")+
-  scale_y_continuous(breaks = c(0, 0.25, 0.5, 0.75, 1),
-                     labels = c(0, 0.25, 0.5, 0.75, 1),
+  scale_y_continuous(breaks = c(0, 0.25,0.50,0.75,1.0),
+                     labels = c(0, 0.25,0.50,0.75,1.0),
                      limits = c(0, 1))+
   labs(x = element_blank(),
        y = expression(paste(GW[CO2], ' (mol  ', CO[2],' ', m^-2,' ', d^-1, ')')))
@@ -556,8 +556,8 @@ Fig6_NEP <- ggplot(Tac_fluxes %>%
   geom_hline(yintercept = 0, linetype = 'dashed')+
   scale_x_datetime(date_breaks = "1 month", 
                    date_labels =  "%b")+
-  scale_y_continuous(breaks = c(-0.25, 0, 0.25, 0.5, 0.75, 1),
-                     labels = c(-0.25, 0, 0.25, 0.5, 0.75, 1),
+  scale_y_continuous(breaks = c(-0.25, 0, 0.25,0.50,0.75,1.0),
+                     labels = c(-0.25, 0, 0.25,0.50,0.75,1.0),
                      limits = c(-0.25, 1))+
   labs(x = element_blank(),
        y = expression(paste('NEP (mol  ', CO[2],' ', m^-2,' ', d^-1, ')')))
@@ -583,11 +583,11 @@ Fig6d <- ggplot(Tac_fluxes %>%
   labs(x = expression(paste(GW[CO2], ' (mol ', CO[2], ' ', m^-2,' ', d^-1, ')')),
        y = expression(paste(F[CO2], ' (mol ', CO[2], ' ',m^-2,' ', d^-1, ')')))+
   scale_x_continuous(limits = c(0, 1),
-                     breaks = c(0,0.25,0.5,0.75,1),
-                     labels = c(0,0.25,0.5,0.75,1))+
+                     breaks = c(0,0.25,0.50,0.75,1.0),
+                     labels = c(0,0.25,0.50,0.75,1.0))+
   scale_y_continuous(limits = c(0, 1),
-                     breaks = c(0,0.25,0.5,0.75,1),
-                     labels = c(0,0.25,0.5,0.75,1))+
+                     breaks = c(0,0.25,0.50,0.75,1.0),
+                     labels = c(0,0.25,0.50,0.75,1.0))+
   scale_color_viridis_d(name = element_blank())
 Fig6d
 
@@ -604,11 +604,11 @@ Fig6e <- ggplot(Tac_fluxes %>%
        y = expression(paste(F[CO2], ' (mol ', CO[2], ' ',m^-2,' ', d^-1, ')')))+
   scale_color_viridis_d(name = element_blank())+
   scale_x_continuous(limits = c(-0.25, 1),
-                     breaks = c(-0.25, 0,0.25,0.5,0.75,1),
-                     labels = c(-0.25, 0,0.25,0.5,0.75,1))+
+                     breaks = c(-0.25, 0,0.25,0.50,0.75,1.0),
+                     labels = c(-0.25, 0,0.25,0.50,0.75,1.0))+
   scale_y_continuous(limits = c(0, 1),
-                     breaks = c(0,0.25,0.5,0.75,1),
-                     labels = c(0,0.25,0.5,0.75,1))
+                     breaks = c(0,0.25,0.50,0.75,1.0),
+                     labels = c(0,0.25,0.50,0.75,1.0))
 Fig6e
 
 Fig6b <- plot_grid(Fig6d, Fig6e,
